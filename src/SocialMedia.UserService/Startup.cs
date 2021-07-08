@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.OpenApi.Models;
 using SocialMedia.UserService.Data;
+using SocialMedia.UserService.Services;
 
 namespace SocialMedia.UserService
 {
@@ -28,6 +29,9 @@ namespace SocialMedia.UserService
             });
 
             services.AddDbContext<UserServiceContext>(options => options.UseSqlite(@"Data Source=user.db"));
+
+            services.AddSingleton<IntegrationEventSenderService>();
+            services.AddHostedService(provider => provider.GetService<IntegrationEventSenderService>());
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.

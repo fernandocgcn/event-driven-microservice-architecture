@@ -1,11 +1,10 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Newtonsoft.Json;
-using RabbitMQ.Client;
 using SocialMedia.UserService.Data;
 using SocialMedia.UserService.Entities;
+using SocialMedia.UserService.Services;
 using System.Collections.Generic;
-using System.Text;
 using System.Threading.Tasks;
 
 namespace SocialMedia.UserService.Controllers
@@ -15,10 +14,13 @@ namespace SocialMedia.UserService.Controllers
     public class UsersController : ControllerBase
     {
         private readonly UserServiceContext _context;
+        private readonly IntegrationEventSenderService _integrationEventSenderService;
 
-        public UsersController(UserServiceContext context)
+        public UsersController(UserServiceContext context, 
+            IntegrationEventSenderService integrationEventSenderService)
         {
             _context = context;
+            _integrationEventSenderService = integrationEventSenderService;
         }
 
         [HttpGet]
@@ -27,31 +29,29 @@ namespace SocialMedia.UserService.Controllers
             return await _context.User.ToListAsync();
         }
 
-        private static void PublishToMessageQueue(string integrationEvent, string eventData)
-        {
-            // TOOO: Reuse and close connections and channel, etc, 
-            var factory = new ConnectionFactory();
-            var connection = factory.CreateConnection();
-            var channel = connection.CreateModel();
-            var body = Encoding.UTF8.GetBytes(eventData);
-            channel.BasicPublish(exchange: "social-media.user",
-                                             routingKey: integrationEvent,
-                                             basicProperties: null,
-                                             body: body);
-        }
-
         [HttpPut("{id}")]
         public async Task<IActionResult> PutUser(int id, User user)
         {
+            using var transaction = _context.Database.BeginTransaction();
+
             _context.Entry(user).State = EntityState.Modified;
             await _context.SaveChangesAsync();
 
             var integrationEventData = JsonConvert.SerializeObject(new
             {
                 id = user.ID,
-                newname = user.Name
+                newname = user.Name,
             });
-            PublishToMessageQueue("social-media.user.update", integrationEventData);
+            _context.IntegrationEventOutbox.Add(
+                new IntegrationEvent()
+                {
+                    Event = "social-media.user.update",
+                    Data = integrationEventData
+                });
+
+            _context.SaveChanges();
+            _integrationEventSenderService.StartPublishingOutstandingIntegrationEvents();
+            transaction.Commit();
 
             return NoContent();
         }
@@ -59,15 +59,29 @@ namespace SocialMedia.UserService.Controllers
         [HttpPost]
         public async Task<ActionResult<User>> PostUser(User user)
         {
+            user.Version = 1;
+            using var transaction = _context.Database.BeginTransaction();
             _context.User.Add(user);
-            await _context.SaveChangesAsync();
+            _context.SaveChanges();
 
             var integrationEventData = JsonConvert.SerializeObject(new
             {
                 id = user.ID,
-                name = user.Name
+                name = user.Name,
+                version = user.Version
             });
-            PublishToMessageQueue("social-media.user.add", integrationEventData);
+
+            _context.IntegrationEventOutbox.Add(
+                new IntegrationEvent()
+                {
+                    Event = "social-media.user.add",
+                    Data = integrationEventData
+                });
+
+            _context.SaveChanges();
+            transaction.Commit();
+
+            _integrationEventSenderService.StartPublishingOutstandingIntegrationEvents();
 
             return CreatedAtAction("GetUser", new { id = user.ID }, user);
         }
